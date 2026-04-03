@@ -148,26 +148,26 @@ class DVGT1Aggregator(nn.Module):
         images = (images - self._resnet_mean) / self._resnet_std
 
         # Reshape to [B*T*V, C, H, W] for patch embedding
-        images = images.view(B * T * V, C_in, H, W)
-
-        patch_tokens = self.patch_embed.forward_features(images)
+        images = images.view(B * T * V, C_in, H, W)                # (32 3 288 512)
+        # 使用视觉基础模型提取每张图像的视觉特征
+        patch_tokens = self.patch_embed.forward_features(images)   # x_norm_clstoken: (32 1024) x_storage_tokens: (32 4 1024) x_norm_patchtokens: (32 576 1024)  
 
         if isinstance(patch_tokens, dict):
-            patch_tokens = patch_tokens["x_norm_patchtokens"]
+            patch_tokens = patch_tokens["x_norm_patchtokens"]      # (32 576 1024)
 
         _, P, C = patch_tokens.shape
 
-        patch_tokens = patch_tokens.view(B, T, V, P, C)
+        patch_tokens = patch_tokens.view(B, T, V, P, C)            # (1 4 8 576 1024)
 
-        temporal_embed = self.temporal_pos_embed[:, :T, :][:, :, None, None, :].contiguous()
+        temporal_embed = self.temporal_pos_embed[:, :T, :][:, :, None, None, :].contiguous()  # temporal_pos_embed:(1 48 1024)
         patch_tokens = patch_tokens + temporal_embed
             
         # Reshape back to [B*T*V, P, C] for subsequent processing
-        patch_tokens = patch_tokens.view(B * T * V, P, C)
+        patch_tokens = patch_tokens.view(B * T * V, P, C)          # (32 576 1024)
 
         # Expand ego, camera and register tokens to match batch size and sequence length
-        register_token = slice_expand_and_flatten(self.register_token, B, T, V)
-        ego_pose_token = slice_expand_and_flatten(self.ego_pose_token, B, T, V)
+        register_token = slice_expand_and_flatten(self.register_token, B, T, V) # (32 4 1024)
+        ego_pose_token = slice_expand_and_flatten(self.ego_pose_token, B, T, V) # (32 1 1024)
 
         # Concatenate special tokens with patch tokens
         tokens = [ego_pose_token, register_token, patch_tokens]
@@ -175,30 +175,36 @@ class DVGT1Aggregator(nn.Module):
 
         pos = None
         if self.rope is not None:
-            pos = self.position_getter(B * T * V, H // self.patch_size, W // self.patch_size, device=images.device)
+            pos = self.position_getter(B * T * V, H // self.patch_size, W // self.patch_size, device=images.device) # (32 576 2)
 
         if self.patch_start_idx > 0:
             # do not use position embedding for special tokens (camera and register tokens)
             # so set pos to 0 for the special tokens
             pos = pos + 1
-            pos_special = torch.zeros(B * T * V, self.patch_start_idx, 2).to(images.device).to(pos.dtype)
-            pos = torch.cat([pos_special, pos], dim=1)
+            pos_special = torch.zeros(B * T * V, self.patch_start_idx, 2).to(images.device).to(pos.dtype) # (32 5 2)
+            pos = torch.cat([pos_special, pos], dim=1)                                                    # (32 581 2) 576+5=581
 
         # update P because we added special tokens
         _, P, C = tokens.shape
         intra_view_idx, cross_view_idx, cross_frame_idx = 0, 0, 0
         output_list = []
-
-        for i in range(self.aa_block_num):
-            for attn_type in self.aa_order:
+        # 交替的视图内局部注意力(intra-view local attention)、跨视图空间注意力(cross-view spatial attention)、跨帧时间注意力(cross-frame temporal attention)
+        for i in range(self.aa_block_num):   # 24 
+            for attn_type in self.aa_order:  # 'intra_view' 'cross_view' 'cross_frame'
+                #=============================#
+                # 视图内局部注意力
                 if attn_type == "intra_view":
                     tokens, intra_view_idx, intra_view_intermediates = self._process_intra_view_attention(
                         tokens, B, T, V, P, C, intra_view_idx, pos=pos
                     )
+                #=============================#
+                # 跨视图空间注意力
                 elif attn_type == "cross_view":
                     tokens, cross_view_idx, cross_view_intermediates = self._process_cross_view_attention(
                         tokens, B, T, V, P, C, cross_view_idx, pos=pos
                     )
+                #=============================#
+                # 跨帧时间注意力
                 elif attn_type == "cross_frame":
                     tokens, cross_frame_idx, cross_frame_intermediates = self._process_cross_frame_attention(
                         tokens, B, T, V, P, C, cross_frame_idx, pos=pos
@@ -206,16 +212,18 @@ class DVGT1Aggregator(nn.Module):
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
 
-            for j in range(len(intra_view_intermediates)):
+            for j in range(len(intra_view_intermediates)): # len:1
                 # concat intermediates, [B*T*V, P, 3C]
                 concat_inter = [cross_frame_intermediates[j], cross_view_intermediates[j], intra_view_intermediates[j]]
-                output_list.append(torch.cat(concat_inter, dim=-1))
+                output_list.append(torch.cat(concat_inter, dim=-1)) # (1 4 8 581 3072) 1024x3=3072
 
 
         del concat_inter, intra_view_intermediates, cross_view_intermediates, cross_frame_intermediates
 
         return output_list, self.patch_start_idx
 
+    #================================#
+    # 视图内局部注意力：同一时序下在每个view内部做attention(只看P)
     def _process_intra_view_attention(self, tokens, B, T, V, P, C, start_idx, pos):
         # Shape: (B*T*V, P, C)
         # RoPE pos: (B*T*V, P, 2) matches tokens perfectly
@@ -234,7 +242,9 @@ class DVGT1Aggregator(nn.Module):
             intermediates.append(tokens.view(B, T, V, P, C))
             
         return tokens, idx, intermediates
-
+    
+    #================================#    
+    # 跨视图注意力(跨相机)：同一时序的不同相机之间做交互
     def _process_cross_view_attention(self, tokens, B, T, V, P, C, start_idx, pos):
         # Target Shape: (B*T, V*P, C)
         # Reshape tokens
@@ -262,7 +272,9 @@ class DVGT1Aggregator(nn.Module):
         
         # Return flattened (B*T*V, P, C) for next stage to maintain consistency
         return tokens_reshaped.view(B * T * V, P, C), idx, intermediates
-
+    
+    #================================#    
+    # 跨时序注意力(跨相机)：让不同时间帧之间做交互：不同时序间同一个view间交互
     def _process_cross_frame_attention(self, tokens, B, T, V, P, C, start_idx, pos):
         # Target Shape: (B*V, T*P, C)
         tokens_reshaped = tokens.view(B, T, V, P, C).transpose(1, 2).contiguous().view(B * V, T * P, C)

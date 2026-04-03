@@ -88,10 +88,10 @@ class DVGT1EgoPoseHead(nn.Module):
         tokens = aggregated_tokens_list[-1]
 
         # Extract the ego pose tokens
-        pose_tokens = tokens[:, :, :, self.ego_pose_token_index]    # (B T V dim)
+        pose_tokens = tokens[:, :, :, self.ego_pose_token_index]    # (1 4 8 3072) # (B T V dim)
 
         # Concatenate the ego pose tokens of all views in one frame.
-        pose_tokens = pose_tokens.mean(2)    # (B T dim)
+        pose_tokens = pose_tokens.mean(2)                           # (1 4 3072)   # (B T dim)
         pose_tokens = self.token_norm(pose_tokens)
 
         pred_pose_enc_list = self.trunk_fn(pose_tokens, num_iterations)
@@ -112,7 +112,7 @@ class DVGT1EgoPoseHead(nn.Module):
         pred_pose_enc = None
         pred_pose_enc_list = []
 
-        for _ in range(num_iterations):
+        for _ in range(num_iterations): # 4
             # Use a learned empty pose for the first iteration.
             if pred_pose_enc is None:
                 module_input = self.embed_pose(self.empty_pose_tokens.expand(B, T, -1))

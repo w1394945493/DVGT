@@ -103,6 +103,9 @@ def parse_args():
     parser.add_argument(
         "--model_name", type=str, default="DVGT1", choices=['DVGT1', 'DVGT2'])
     parser.add_argument(
+        "--checkpoint_path", type=str, default="ckpt/dvgt1.pt", help="Path to folder containing images"
+    )    
+    parser.add_argument(
         "--image_folder", type=str, default="visual_demo_examples/openscene_log-0104-scene-0007", help="Path to folder containing images"
     )    
     parser.add_argument("--start_frame", type=int, default=0, help="The start frame in the example autonomous video.")
@@ -149,7 +152,7 @@ if __name__=='__main__':
     with torch.no_grad():
         with torch.amp.autocast(device, dtype=dtype):
             # Predict attributes including ego pose and point maps.
-            predictions = model(images)
+            predictions = model(images) # 预测：每一帧的自我位姿，以第一帧为自我坐标系的全局点图
             # points = predictions['points'] # (1 16 8 288 512 3)
             point_clouds_to_show, poses = visualize_pred(predictions, args)
 
