@@ -58,21 +58,21 @@ class DVGT1(nn.Module, PyTorchModelHubMixin):
         if len(images.shape) == 5:
             images = images.unsqueeze(0)
             
-        aggregated_tokens_list, patch_start_idx = self.aggregator(images)
+        aggregated_tokens_list, patch_start_idx = self.aggregator(images) # (1 16 8 3 288 512)
 
         predictions = {}
 
         with torch.amp.autocast(device_type=images.device.type, enabled=False):
             if self.ego_pose_head is not None:
                 ego_pose_enc_list = self.ego_pose_head(aggregated_tokens_list)
-                predictions["absolute_ego_pose_enc"] = ego_pose_enc_list[-1]  # pose encoding of the last iteration
+                predictions["absolute_ego_pose_enc"] = ego_pose_enc_list[-1]  # (1 16 7) # pose encoding of the last iteration
                 predictions["absolute_ego_pose_enc_list"] = ego_pose_enc_list
 
             if self.point_head is not None:
                 pts3d, pts3d_conf = self.point_head(
                     aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx, frames_chunk_size=self.frames_chunk_size
                 )
-                predictions["points"] = pts3d
+                predictions["points"] = pts3d                                 # (1 16 8 288 512 3)
                 predictions["points_conf"] = pts3d_conf
 
         if not self.training:
